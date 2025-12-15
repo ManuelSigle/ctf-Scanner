@@ -1,10 +1,8 @@
 import asyncio
 import os
 import time
-from utils import print_info, print_success, print_error, Colors
-
-FAST_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
-SLOW_WORDLIST = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
+from core.utils import print_info, print_success, print_error, Colors
+from core.config import FAST_WORDLIST, SLOW_WORDLIST
 
 async def _monitor_process(label, interval=15):
     """

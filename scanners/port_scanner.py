@@ -1,6 +1,6 @@
 import asyncio
 import re
-from utils import print_info, print_success, print_error, print_section, Colors
+from core.utils import print_info, print_success, print_error, print_section, Colors
 
 async def get_open_ports(target):
     """
