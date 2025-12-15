@@ -1,74 +1,115 @@
 import asyncio
 import os
+import time
 from utils import print_info, print_success, print_error, Colors
 
-# Konfigurierbare Standard-Wordlist. 
-# Für CTFs auf Kali Linux ist dies oft ein guter Startpunkt.
-# Alternativen: /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
-DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+FAST_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
+SLOW_WORDLIST = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
 
-async def run_gobuster(target, port, wordlist=DEFAULT_WORDLIST):
+async def _monitor_process(label, interval=15):
     """
-    Führt gobuster dir auf dem angegebenen Target und Port aus.
+    Ein Heartbeat, der anzeigt, dass der Scan noch läuft.
     """
-    # 1. Prüfen, ob Wordlist existiert
+    start_time = time.time()
+    while True:
+        await asyncio.sleep(interval)
+        elapsed = int(time.time() - start_time)
+        print_info(label, f"... Scan läuft noch ({elapsed}s vergangen) ...")
+
+async def _execute_gobuster(target_url, wordlist, label, known_paths=None):
+    """
+    Hilfsfunktion, die EINEN Gobuster-Prozess ausführt.
+    """
     if not os.path.exists(wordlist):
-        print_error("GOBUSTER", f"Wordlist nicht gefunden: {wordlist}")
-        print_info("GOBUSTER", "Bitte Pfad in modules/webscan.py anpassen oder Wordlist installieren.")
-        return
+        print_error(label, f"Wordlist fehlt: {wordlist} - Überspringe Scan.")
+        return set()
 
-    # 2. Protokoll bestimmen (HTTPS bei 443, sonst HTTP raten)
-    # Für einen perfekten Scanner müsste man eigentlich prüfen, ob SSL läuft,
-    # aber für einfache CTFs ist diese Heuristik meist ok.
-    protocol = "https" if port in ['443', '8443'] else "http"
-    base_url = f"{protocol}://{target}:{port}"
-
-    print_info("GOBUSTER", f"Starte Web-Scan auf: {base_url}")
-
-    # -k: Skip SSL verification
-    # -q: Quiet (weniger Banner Output)
-    # -t 50: Threads
+    print_info(label, f"Starte Scan mit {wordlist}...")
+    
     command = [
         "gobuster", "dir", 
-        "-u", base_url, 
+        "-u", target_url, 
         "-w", wordlist, 
-        "-k", 
-        "-t", "50",
-        "-q",
-        "--no-error" # Keine Fehler bei Verbindungsabbruch sofort werfen
+        "-k", "-t", "40", "-q", "--no-error"
     ]
     
-    # Befehl anzeigen (wie angefordert)
-    print_info("EXEC", " ".join(command))
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    # Starte den Heartbeat-Monitor im Hintergrund
+    monitor_task = asyncio.create_task(_monitor_process(label))
+
+    new_findings = set()
 
     try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        # Wir lesen den Output live, da Gobuster lange dauern kann
         while True:
             line = await process.stdout.readline()
             if not line:
                 break
             
             line_str = line.decode('utf-8').strip()
-            
-            if line_str:
-                # Gobuster Output Formatierung
-                # Format ist meist: /admin (Status: 301) [Size: 123]
-                if "(Status: 200)" in line_str:
-                     print_success(f"WEB-{port}", line_str)
-                elif "(Status: 301)" in line_str or "(Status: 302)" in line_str:
-                     print_info(f"WEB-{port}", f"{Colors.WARNING}{line_str}{Colors.ENDC}")
-                elif "(Status: 403)" in line_str:
-                     print_info(f"WEB-{port}", f"Forbidden: {line_str}")
-                else:
-                     print_info(f"WEB-{port}", line_str)
+            if not line_str:
+                continue
 
-        await process.wait()
+            path = line_str.split(' ')[0]
+
+            if known_paths is not None and path in known_paths:
+                continue 
+
+            new_findings.add(path)
+
+            prefix = "[NEW]" if known_paths is not None else ""
+            
+            if "(Status: 200)" in line_str:
+                 print_success(label, f"{prefix} {line_str}")
+            elif "(Status: 403)" in line_str:
+                 print_info(label, f"{Colors.WARNING}{prefix} Forbidden: {path}{Colors.ENDC}")
+            else:
+                 print_info(label, f"{prefix} {line_str}")
+    finally:
+        # Wichtig: Monitor beenden, wenn der Prozess fertig ist
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    await process.wait()
+    return new_findings
+
+async def run_web_recon(target, port, semaphore):
+    """
+    Hauptfunktion für den Web-Scan. Führt nacheinander Fast- und Slow-Scan aus.
+    """
+    protocol = "https" if port in ['443', '8443'] else "http"
+    base_url = f"{protocol}://{target}:{port}"
+    identifier = f"WEB-{port}"
+
+    async with semaphore:
+        # PHASE 1
+        print_info(identifier, f"Start Phase 1: Fast Scan ({base_url})")
+        found_paths = await _execute_gobuster(
+            base_url, 
+            FAST_WORDLIST, 
+            f"{identifier}-FAST"
+        )
         
-    except FileNotFoundError:
-        print_error("GOBUSTER", "Gobuster ist nicht installiert! (apt install gobuster)")
+        if not found_paths:
+            print_info(identifier, "Fast Scan lieferte keine Ergebnisse.")
+
+        # PHASE 2
+        if os.path.exists(SLOW_WORDLIST):
+            print_info(identifier, f"Start Phase 2: Deep Scan (Nur neue Ergebnisse anzeigen)")
+            await _execute_gobuster(
+                base_url, 
+                SLOW_WORDLIST, 
+                f"{identifier}-DEEP",
+                known_paths=found_paths
+            )
+        else:
+            print_info(identifier, "Große Wordlist nicht gefunden, überspringe Phase 2.")
+            
+        print_success(identifier, "Web Recon abgeschlossen.")
