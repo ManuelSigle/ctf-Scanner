@@ -1,15 +1,11 @@
 import asyncio
 import argparse
 import sys
-from modules.portscan import get_open_ports, run_detailed_scan, print_formatted_nmap
-from modules.webscan import run_web_recon
-from utils import Colors, print_section, print_info
-
-# Liste von Ports, die wir als "Webserver" identifizieren
-WEB_PORTS = ['80', '443', '8080', '8000', '8081', '3000', '5000', '8443']
-
-# MAXIMALE GLEICHZEITIGE WEB SCANS (nur relevant, wenn mehrere Web-Ports gefunden werden)
-MAX_CONCURRENT_WEB_SCANS = 2
+from scanners.port_scanner import get_open_ports, run_detailed_scan, print_formatted_nmap
+from scanners.web_scanner import run_web_recon
+from scanners.subdomain_scanner import run_subdomain_recon
+from core.utils import Colors, print_section, print_info
+from core.config import WEB_PORTS, MAX_CONCURRENT_WEB_SCANS
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Custom CTF Recon Scanner")
@@ -62,7 +58,11 @@ async def main():
         await asyncio.gather(*web_tasks)
         
     else:
-        print_info("MAIN", "Keine Web-Ports erkannt. Überspringe Gobuster.")
+        print_info("MAIN", "Keine Web-Ports erkannt. Überspringe Web-Recon.")
+
+    # --- SCHRITT 5: Subdomain Recon (Gobuster DNS) ---
+    print_section("STARTING SUBDOMAIN RECON")
+    await run_subdomain_recon(args.target)
 
     print_section("ALL SCANS FINISHED")
 
